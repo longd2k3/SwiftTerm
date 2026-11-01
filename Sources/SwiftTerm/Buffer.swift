@@ -977,7 +977,7 @@ public final class Buffer {
             if rows < newRows {
                 for _ in rows..<newRows {
                     if lines.count < newRows + yBase {
-                        if yBase > 0 && lines.count <= yBase + self.y + addToY + 1 {
+                        if yBase > 0 && (lines.count <= yBase + self.y + addToY + 1 || (hasScrollback && !lines [lines.count - 1].isVisuallyBlank ())) {
                             // There is room above the buffer and there are no empty elements below the line,
                             // scroll up
                             yBase -= 1
@@ -997,13 +997,17 @@ public final class Buffer {
             } else { // (this._rows >= newRows)
                 for _ in (newRows..<rows).reversed () {
                     if lines.count > newRows + yBase {
-                        if lines.count > yBase + self.y + 1 {
-                            // The line is a blank line below the cursor, remove it
+                        let cursorOnLastLine = lines.count <= yBase + self.y + 1
+                        if !cursorOnLastLine && (!hasScrollback || self.y == 0 || lines [lines.count - 1].isVisuallyBlank ()) {
+                            // Blank row below the cursor, or the cursor is on the top row and must stay on screen: drop the bottom row
                             lines.pop ()
                         } else {
-                            // The line is the cursor, scroll down
+                            // Bottom row holds content (or is the cursor row): push the top row into scrollback
                             yBase += 1
                             yDisp += 1
+                            if !cursorOnLastLine {
+                                self.y -= 1 // keep the cursor on its line; y >= 1 here because y == 0 pops
+                            }
                         }
                     }
                 }
