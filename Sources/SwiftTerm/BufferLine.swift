@@ -609,6 +609,19 @@ public final class BufferLine: CustomDebugStringConvertible {
         return false
     }
 
+    /// True when no cell shows anything: every cell is unwritten (0) or a space (32) with the
+    /// default attribute, and the line holds no image. `Buffer.resize` drops only such rows.
+    func isVisuallyBlank () -> Bool {
+        if images != nil { return false }
+        for i in 0..<storage.count {
+            let code = storage.logicalCode(at: i)
+            if (code != 0 && code != 32) || storage.attribute(at: i) != CharData.defaultAttr {
+                return false
+            }
+        }
+        return true
+    }
+
     /// Repeatedly inserts a CharData elements into the buffer line.
     /// - Parameters:
     ///  - pos: position where to insert the data

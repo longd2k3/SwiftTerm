@@ -581,4 +581,78 @@ final class BufferTests: TerminalDelegate {
         #expect(list.count == 0)
         #expect(list.getArray().allSatisfy { $0 == nil })
     }
+
+    private func makeTerminalWithHistoryAndBottomContent() -> Terminal {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 24, scrollback: 1_000))
+        for i in 1...40 {
+            terminal.feed(text: "history \(i)\r\n")
+        }
+        terminal.feed(text: "\u{1b}[22;1H> \u{1b}[K\u{1b}[23;1HBORDER\u{1b}[K\u{1b}[24;1HSTATUS\u{1b}[K\u{1b}[22;3H")
+        return terminal
+    }
+
+    @Test func resizeShrinkKeepsContentRowsBelowCursor() {
+        let terminal = makeTerminalWithHistoryAndBottomContent()
+        let initialYBase = terminal.buffer.yBase
+
+        terminal.resize(cols: 80, rows: 10)
+
+        #expect(terminal.getLine(row: 9)?.translateToString(trimRight: true) == "STATUS")
+        #expect(terminal.getLine(row: 8)?.translateToString(trimRight: true) == "BORDER")
+        #expect(terminal.getLine(row: 7)?.translateToString(trimRight: true) == "> ")
+        let loc = terminal.getCursorLocation()
+        #expect(loc.x == 2)
+        #expect(loc.y == 7)
+        #expect(terminal.buffer.yBase == initialYBase + 14)
+
+        terminal.feed(text: "X")
+        #expect(terminal.getLine(row: 7)?.translateToString(trimRight: true) == "> X")
+    }
+
+    @Test func resizeShrinkThenGrowRestoresScreen() {
+        let terminal = makeTerminalWithHistoryAndBottomContent()
+        let initialYBase = terminal.buffer.yBase
+        let initialRows = (0..<24).map { terminal.getLine(row: $0)?.translateToString(trimRight: true) }
+
+        terminal.resize(cols: 80, rows: 10)
+        terminal.resize(cols: 80, rows: 24)
+
+        let restoredRows = (0..<24).map { terminal.getLine(row: $0)?.translateToString(trimRight: true) }
+        #expect(restoredRows == initialRows)
+        #expect(terminal.buffer.yBase == initialYBase)
+        #expect(terminal.getCursorLocation().y == 21)
+    }
+
+    @Test func resizeShrinkDropsBlankRowsBelowCursorFirst() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 24, scrollback: 1_000))
+        for i in 1...40 {
+            terminal.feed(text: "history \(i)\r\n")
+        }
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J\u{1b}[6;1H$ ")
+        let initialYBase = terminal.buffer.yBase
+
+        terminal.resize(cols: 80, rows: 10)
+
+        #expect(terminal.buffer.yBase == initialYBase)
+        #expect(terminal.getCursorLocation().y == 5)
+        #expect(terminal.getLine(row: 5)?.translateToString(trimRight: true) == "$ ")
+    }
+
+    @Test func resizeShrinkKeepsCursorOnScreenWhenContentBelowIsTaller() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 80, rows: 24, scrollback: 1_000))
+        for i in 1...40 {
+            terminal.feed(text: "history \(i)\r\n")
+        }
+        terminal.feed(text: "\u{1b}[H\u{1b}[2J")
+        for r in 2...24 {
+            terminal.feed(text: "\u{1b}[\(r);1Hrow \(r)")
+        }
+        terminal.feed(text: "\u{1b}[1;1H# ")
+
+        terminal.resize(cols: 80, rows: 10)
+
+        #expect(terminal.getCursorLocation().y == 0)
+        #expect(terminal.getLine(row: 0)?.translateToString(trimRight: true) == "# ")
+        #expect(terminal.getLine(row: 1)?.translateToString(trimRight: true) == "row 2")
+    }
 }
