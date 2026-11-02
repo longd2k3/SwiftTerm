@@ -1033,10 +1033,24 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         guard gestureRecognizer.view != nil,
               gestureRecognizer.state == .ended else { return }
 
+        let tapLocation = gestureRecognizer.location(in: self)
+        if linkHighlightMode == .hover || (linkHighlightMode == .hoverWithModifier && commandActive) {
+            updateLinkHighlightIfNeeded(at: tapLocation, modifiers: [.command], force: true)
+        }
+
         let tapHit = calculateTapHit(gesture: gestureRecognizer).grid
         if let result = linkForClick(at: tapHit, hasCommandModifier: commandActive) {
+            let oldRange = linkHighlightRange
+            linkHighlightRange = nil
+            invalidateLinkHighlight(oldRange: oldRange, newRange: nil)
+            frameDriver.markDirty()
             terminalDelegate?.requestOpenLink(source: self, link: result.link, params: result.params)
             return
+        } else if linkHighlightMode == .hover || linkHighlightMode == .hoverWithModifier {
+            let oldRange = linkHighlightRange
+            linkHighlightRange = nil
+            invalidateLinkHighlight(oldRange: oldRange, newRange: nil)
+            frameDriver.markDirty()
         }
 
         // A tracking application owns the click even while the software keyboard is dismissed.
