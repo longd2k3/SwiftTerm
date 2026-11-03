@@ -1268,6 +1268,14 @@ open class TerminalView: NSView, NSUserInterfaceValidations, TerminalDelegate {
         uiShutdownState = .stopped
         return true
     }
+
+    deinit {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                _ = updateUiClosed()
+            }
+        }
+    }
     
     func setupOptions ()
     {

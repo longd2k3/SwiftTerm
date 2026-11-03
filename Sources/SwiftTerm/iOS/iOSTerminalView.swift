@@ -718,6 +718,14 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         uiShutdownState = .stopped
         return true
     }
+
+    deinit {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                _ = updateUiClosed()
+            }
+        }
+    }
     
     @objc open override func paste (_ sender: Any?) {
         disableSelectionPanGesture()
