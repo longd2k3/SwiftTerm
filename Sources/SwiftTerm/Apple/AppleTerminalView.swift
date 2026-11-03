@@ -374,7 +374,7 @@ fileprivate let coreTextRunAttributeNames = CoreTextRunAttributeNames()
 ///
 /// Each Core Graphics renderer creates these immutable keys once. They do not
 /// cross a concurrency boundary, and keyed lookups do not bridge per run.
-fileprivate struct CoreTextRunAttributeKeys {
+fileprivate struct CoreTextRunAttributeKeys: @unchecked Sendable {
     let font: NSString
     let foreground: NSString
     let background: NSString
@@ -420,6 +420,7 @@ struct PreparedRun {
 /// at the same time. Keeping the cache with its view gives it the same lifetime
 /// and executor as the Core Graphics draw path.
 final class CoreGraphicsRenderCache {
+    @MainActor
     fileprivate static let runAttributeKeys = CoreTextRunAttributeKeys(
         names: coreTextRunAttributeNames)
     fileprivate var runAttributeKeys: CoreTextRunAttributeKeys { Self.runAttributeKeys }
