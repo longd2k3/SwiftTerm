@@ -420,8 +420,9 @@ struct PreparedRun {
 /// at the same time. Keeping the cache with its view gives it the same lifetime
 /// and executor as the Core Graphics draw path.
 final class CoreGraphicsRenderCache {
-    fileprivate let runAttributeKeys = CoreTextRunAttributeKeys(
+    fileprivate static let runAttributeKeys = CoreTextRunAttributeKeys(
         names: coreTextRunAttributeNames)
+    fileprivate var runAttributeKeys: CoreTextRunAttributeKeys { Self.runAttributeKeys }
     private var cgColors: [TTColor: CGColor] = [:]
     private struct CTLineCacheKey: Hashable {
         let text: NSAttributedString
