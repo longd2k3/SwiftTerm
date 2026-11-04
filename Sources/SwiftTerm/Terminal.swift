@@ -1195,6 +1195,7 @@ open class Terminal {
         setupTabStops()
 
         setup()
+        lineChanges.record(_buffer, rows: _rows)
     }
 
     deinit {
@@ -1939,20 +1940,14 @@ open class Terminal {
         if charset == nil && readingBuffer.putbackBuffer.isEmpty {
             let end = ByteRunScanner.firstNonASCIIByte(in: pending, from: pending.startIndex)
             if end > pending.startIndex {
-                let startY = buffer.y
-                let startYDisp = buffer._yDisp
-                updateRange(borrowing: buffer, startY)
+                // No updateRange call: getUpdateRange finds the row from
+                // its line generation.
                 let consumed = buffer.insertAsciiRun(pending[pending.startIndex..<end],
                                                      styleID: curStyleID,
                                                      payloadCode: resolveActiveHyperlinkPayloadCode())
                 if consumed > 0 {
                     cursorStartsNewGrapheme = false
                     previousScalar = UnicodeUtil.graphemeNeutralScalar
-                }
-                // With the same row and viewport, the call above already
-                // marked this row. Only a wrap or a scroll needs a second call.
-                if buffer.y != startY || buffer._yDisp != startYDisp {
-                    updateRange(borrowing: buffer, buffer.y)
                 }
                 // A short consume means insertMode or character protection is
                 // active; the per-character path picks up the rest.
@@ -1963,12 +1958,7 @@ open class Terminal {
             }
         }
 
-        handlePrintSlow(
-            byteCount: pending.count,
-            previousScalar: previousScalar
-        ) { index in
-            pending[pending.startIndex + index]
-        }
+        handlePrintSlow(pending.span, from: 0, previousScalar: previousScalar)
     }
 
     /// Processes a borrowed printable run without making an owned batch copy.
@@ -1998,19 +1988,13 @@ open class Terminal {
         if charset == nil && readingBuffer.putbackBuffer.isEmpty {
             let end = ByteRunScanner.firstNonASCIIByte(in: data, from: pendingStart)
             if end > pendingStart {
-                let startY = buffer.y
-                let startYDisp = buffer._yDisp
-                updateRange(borrowing: buffer, startY)
+                // See handlePrint: no updateRange call.
                 let consumed = buffer.insertAsciiRun(
                     data.extracting(pendingStart..<end), styleID: curStyleID,
                     payloadCode: resolveActiveHyperlinkPayloadCode())
                 if consumed > 0 {
                     cursorStartsNewGrapheme = false
                     previousScalar = UnicodeUtil.graphemeNeutralScalar
-                }
-                // See handlePrint: only a wrap or a scroll needs a second call.
-                if buffer.y != startY || buffer._yDisp != startYDisp {
-                    updateRange(borrowing: buffer, buffer.y)
                 }
                 pendingStart += consumed
                 if pendingStart == data.count {
@@ -2035,12 +2019,7 @@ open class Terminal {
            insertPlainScalar(data, from: start, buffer: buffer, previousScalar: previousScalar) {
             return
         }
-        handlePrintSlow(
-            byteCount: data.count - start,
-            previousScalar: previousScalar
-        ) { index in
-            data[start + index]
-        }
+        handlePrintSlow(data, from: start, previousScalar: previousScalar)
     }
 
     /// Inserts a print run that is one plain scalar — well-formed UTF-8, one
@@ -2091,14 +2070,16 @@ open class Terminal {
         return true
     }
 
-    /// Processes the non-bulk part of a print run. The byte accessor is
-    /// nonescaping, so it can read either an owned slice or a borrowed span.
+    /// Processes the non-bulk part of a print run: the bytes of `data` from
+    /// `start`. It reads the span directly; a byte-accessor closure here cost
+    /// an indirect call for each byte, about a quarter of UTF-8 print time.
     private func handlePrintSlow(
-        byteCount: Int,
-        previousScalar initialPreviousScalar: UInt32?,
-        byteAt: (Int) -> UInt8
+        _ data: Span<UInt8>,
+        from start: Int,
+        previousScalar initialPreviousScalar: UInt32?
     )
     {
+        let byteCount = data.count - start
         let buffer = self.buffer
         let putback = readingBuffer.putbackBuffer
         let putbackCount = putback.count
@@ -2127,7 +2108,7 @@ open class Terminal {
             if inputIndex < putbackCount {
                 result = putback[inputIndex]
             } else {
-                result = byteAt(inputIndex - putbackCount)
+                result = data[start + inputIndex - putbackCount]
             }
             inputIndex += 1
             return result
@@ -2138,7 +2119,7 @@ open class Terminal {
             if index < putbackCount {
                 return putback[index]
             }
-            return byteAt(index - putbackCount)
+            return data[start + index - putbackCount]
         }
 
         /// Returns the last scalar of the cell that a combining scalar would
@@ -2186,26 +2167,39 @@ open class Terminal {
                 value = UInt32(firstByte)
             } else {
                 guard size > 1, index + size <= totalCount else { return nil }
-                value = UInt32(firstByte) & (0x7F >> UInt32(size))
-                var wellFormed = true
-                for offset in 1..<size {
-                    let nextByte = byte(at: index + offset)
-                    if nextByte & 0xC0 != 0x80 {
-                        wellFormed = false
+                // Straight-line decode: a `for` loop over `1..<size` here
+                // compiles to generic iterator calls.
+                let second = byte(at: index + 1)
+                // Each continuation byte is 10xxxxxx: bit 7 set in the AND of
+                // all of them, bit 6 clear in the OR.
+                var andBits = second
+                var orBits = second
+                value = (UInt32(firstByte) & (0x7F >> UInt32(size))) << 6
+                    | (UInt32(second) & 0x3F)
+                if size > 2 {
+                    let third = byte(at: index + 2)
+                    andBits &= third
+                    orBits |= third
+                    value = (value << 6) | (UInt32(third) & 0x3F)
+                    if size > 3 {
+                        let fourth = byte(at: index + 3)
+                        andBits &= fourth
+                        orBits |= fourth
+                        value = (value << 6) | (UInt32(fourth) & 0x3F)
                     }
-                    value = (value << 6) | (UInt32(nextByte) & 0x3F)
                 }
                 let minimum: UInt32 = size == 2 ? 0x80 :
                     (size == 3 ? 0x800 : 0x10000)
-                guard wellFormed, value >= minimum else { return nil }
+                guard andBits & 0x80 != 0, orBits & 0x40 == 0,
+                      value >= minimum, value <= 0x10FFFF,
+                      value & 0xFFFFF800 != 0xD800 else { return nil }
             }
-            guard let scalar = Unicode.Scalar(value) else { return nil }
-            let width = UnicodeUtil.columnWidth(rune: scalar)
+            let width = value >= 0x20 && value < 0x7F ? 1 : UnicodeWidthData.columnWidth(value)
             // The emoji-modifier exclusion is also the precondition for the
             // `graphemeJoinNonEmojiModifier` calls in `insertScalarBatch`.
             guard width == 1 || width == 2,
                   value != 0x200D,
-                  !UnicodeUtil.isRegionalIndicator(scalar),
+                  !UnicodeUtil.isRegionalIndicator(value),
                   !UnicodeUtil.isVariationSelector(value),
                   !UnicodeUtil.isEmojiModifier(value) else {
                 return nil
@@ -2259,8 +2253,8 @@ open class Terminal {
             return true
         }
 
-        /// Inserts a prefix of width-homogeneous subruns. Difficult scalars
-        /// stay on the existing path below.
+        /// Inserts a prefix of batchable scalars, narrow and wide mixed, with
+        /// one call. Difficult scalars stay on the existing path below.
         func insertScalarBatch() -> Bool {
             guard batchingEnabled, hasNext(), buffer.allowsBulkInsert else { return false }
             guard let first = batchableScalar(at: inputIndex) else { return false }
@@ -2298,6 +2292,7 @@ open class Terminal {
                         widths.baseAddress!.advanced(by: 1).initialize(to: second.width)
                         var scan = batchStart + first.size + second.size
                         var count = 2
+                        var columns = Int(first.width) + Int(second.width)
                         var previousValue = second.value
                         var previousProperties = second.properties
                         while scan < totalCount && count < capacity {
@@ -2320,6 +2315,7 @@ open class Terminal {
                             scalars.baseAddress!.advanced(by: count).initialize(to: next.value)
                             sizes.baseAddress!.advanced(by: count).initialize(to: UInt8(next.size))
                             widths.baseAddress!.advanced(by: count).initialize(to: next.width)
+                            columns += Int(next.width)
                             count += 1
                             scan += next.size
                         }
@@ -2328,35 +2324,25 @@ open class Terminal {
                             sizes.baseAddress!.deinitialize(count: count)
                             widths.baseAddress!.deinitialize(count: count)
                         }
-                        var inserted = 0
-                        var consumedBytes = 0
-                        while inserted < count {
-                            let runWidth = widths[inserted]
-                            var runEnd = inserted + 1
-                            while runEnd < count, widths[runEnd] == runWidth {
-                                runEnd += 1
+                        let inserted = buffer.insertScalarRun(
+                            UnsafeBufferPointer(start: scalars.baseAddress!, count: count),
+                            widths: UnsafeBufferPointer(start: widths.baseAddress!, count: count),
+                            columns: columns, styleID: curStyleID, payloadCode: hyperlinkPayloadCode)
+                        if inserted > 0 {
+                            var consumedBytes = 0
+                            var index = 0
+                            while index < inserted {
+                                consumedBytes += Int(sizes[index])
+                                index += 1
                             }
-                            let source = UnsafeBufferPointer(
-                                start: scalars.baseAddress!.advanced(by: inserted),
-                                count: runEnd - inserted)
-                            let consumed = buffer.insertScalarRun(
-                                source, width: Int(runWidth), styleID: curStyleID,
-                                payloadCode: hyperlinkPayloadCode)
-                            if consumed > 0 {
-                                for index in inserted ..< (inserted + consumed) {
-                                    consumedBytes += Int(sizes[index])
-                                }
-                                inputIndex = batchStart + consumedBytes
-                                cursorStartsNewGrapheme = false
-                                previousScalar = scalars[inserted + consumed - 1]
-                            }
-                            inserted += consumed
-                            if inserted < runEnd {
-                                // The scalar path must process the suffix. This
-                                // preserves no-wrap repeated-overwrite behavior.
-                                batchingEnabled = false
-                                break
-                            }
+                            inputIndex = batchStart + consumedBytes
+                            cursorStartsNewGrapheme = false
+                            previousScalar = scalars[inserted - 1]
+                        }
+                        if inserted < count {
+                            // The scalar path must process the suffix. This
+                            // preserves no-wrap repeated-overwrite behavior.
+                            batchingEnabled = false
                         }
                         return inserted > 0
                     }
@@ -4038,6 +4024,13 @@ open class Terminal {
     }
 
     private func parseProgressReport(_ data: ArraySlice<UInt8>) -> ProgressReport? {
+        // Most OSC 9 messages are notifications. Reject them before making a
+        // String and splitting it into fields.
+        guard data.count >= 2,
+              data[data.startIndex] == UInt8(ascii: "4"),
+              data[data.startIndex + 1] == UInt8(ascii: ";") else {
+            return nil
+        }
         guard let text = terminalStringASCII(data) else {
             return nil
         }
@@ -8242,12 +8235,18 @@ open class Terminal {
      */
     public func getUpdateRange () -> (startY: Int, endY: Int)?
     {
-        if refreshEnd == -1 && refreshStart == Int.max {
-            //print ("Emtpy update range")
+        // The print and scroll paths do not mark their rows. The tracker
+        // finds them from the line generations and identities.
+        var start = refreshStart
+        var end = refreshEnd
+        if let changed = lineChanges.changedScreenRows(buffer, rows: rows) {
+            start = min(start, changed.startY)
+            end = max(end, changed.endY)
+        }
+        if end == -1 && start == Int.max {
             return nil
         }
-        //print ("Update: \(refreshStart) \(refreshEnd)")
-        return (refreshStart, refreshEnd)
+        return (start, end)
     }
 
     /**
@@ -8289,15 +8288,25 @@ open class Terminal {
      *
      * This is different from getUpdateRange() in that lines are from start of scroll back,
      * not what the terminal has visible right now.
+     *
+     * A row is in the range when its buffer row shows a different or changed
+     * line. A scroll that adds a line to the scrollback does not change the
+     * rows above the new line. A scroll in a scroll region, or a scroll that
+     * drops the first line of a full scrollback, moves the lines to different
+     * buffer rows, so these rows are in the range.
      */
     public func getScrollInvariantUpdateRange () -> (startY: Int, endY: Int)?
     {
-        if scrollInvariantRefreshEnd == -1 && scrollInvariantRefreshStart == Int.max {
-            //print ("Emtpy update range")
+        var start = scrollInvariantRefreshStart
+        var end = scrollInvariantRefreshEnd
+        if let changed = lineChanges.changedBufferRows(buffer, rows: rows) {
+            start = min(start, changed.startY)
+            end = max(end, changed.endY)
+        }
+        if end == -1 && start == Int.max {
             return nil
         }
-        //print ("Update: \(scrollInvariantRefreshStart) \(scrollInvariantRefreshEnd)")
-        return (scrollInvariantRefreshStart, scrollInvariantRefreshEnd)
+        return (start, end)
     }
     
     /**
@@ -8310,6 +8319,7 @@ open class Terminal {
         
         scrollInvariantRefreshStart = Int.max
         scrollInvariantRefreshEnd = -1
+        lineChanges.record(buffer, rows: rows)
     }
     
     /**
@@ -8679,15 +8689,8 @@ open class Terminal {
         }
 
         //buffer.dump ()
-        // A partial or non-blittable region needs ordinary dirty tracking.
-        // That tracking also includes the refresh range, so do not register
-        // the same endpoints first as scrolling-only updates.
-        if scrollTop != 0 || scrollBottom != _rows - 1 || !hasScrollback {
-            updateRange(borrowing: buffer, startLine: scrollTop, endLine: scrollBottom)
-        } else {
-            updateRange(borrowing: buffer, scrollTop, scrolling: true)
-            updateRange(borrowing: buffer, scrollBottom, scrolling: true)
-        }
+        // No updateRange call: the scroll moves other lines to the screen
+        // rows, and getUpdateRange finds these rows from the line identities.
 
         /**
          * This event is emitted whenever the terminal is scrolled.
@@ -8717,7 +8720,7 @@ open class Terminal {
             print ("Assertion on scroll, state was: bottomRow=\(bottomRow) topRow=\(topRow) yDisp=\(buffer.yDisp) linesTop=\(buffer.linesTop) isAlternate=\(isCurrentBufferAlternate)")
         }
         buffer.yDisp = buffer.yBase
-        updateRange(borrowing: buffer, startLine: scrollTop, endLine: scrollBottom)
+        // See scroll: getUpdateRange finds the moved rows.
         recordScrollNotification()
     }
 
@@ -10414,6 +10417,11 @@ open class Terminal {
 
     /// The last complete pixel layout committed by the host. RIS preserves this value.
     public private(set) var pixelGeometry: TerminalPixelGeometry?
+
+    /// The screen rows at the last `clearUpdateRange()`. The update ranges
+    /// add the rows that changed after that call. This field is the last
+    /// one, so it does not move the offsets of the hot fields.
+    private let lineChanges = LineChangeTracker()
 
 #if !SWIFTTERM_EMBEDDED
     private var kittyClipboardProtocol: KittyClipboardProtocol?
