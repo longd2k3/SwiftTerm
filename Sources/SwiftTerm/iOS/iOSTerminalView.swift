@@ -313,7 +313,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// repaints. Building a crop copies the visible pixels and makes a new
     /// image, which is far too expensive to repeat on every frame - a cursor
     /// blink alone would rebuild every placement.
-    nonisolated let kittyPlacementImageCache = Locked([KittyPlacementImageKey: TTImage]())
+    struct CachedKittyImage {
+        let pixelWidth: Int
+        let pixelHeight: Int
+        let image: TTImage
+    }
+    nonisolated let kittyPlacementImageCache = Locked([KittyPlacementImageKey: CachedKittyImage]())
     nonisolated let crossThreadState = Locked(TerminalViewCrossThreadState())
     nonisolated let frameSignal = FrameDriverSignal()
     public nonisolated let inputSender = TerminalInputSender()
@@ -995,6 +1000,24 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let bottomVisibleLine = (topVisibleLine+frame.height/cellDimension.height)-1
         let lines = withTerminal { $0.displayBuffer.lines.count }
         contentOffset.y = max(0, CGFloat(lines) - bottomVisibleLine) * cellDimension.height
+    }
+    
+    /// Size of one terminal cell in points.
+    public var cellSize: CGSize { CGSize(width: cellDimension.width, height: cellDimension.height) }
+
+    /// Lowest visible-viewport row (0-based from the top of the current viewport, clamped to 0..<rows)
+    /// that is the cursor row or holds non-blank content.
+    public func liveContentBottomRow() -> Int {
+        withTerminal { t in
+            let b = t.buffer
+            var r = t.rows - 1
+            while r > b.y {
+                if !b.lines[b.yBase + r].isVisuallyBlank() { break }
+                r -= 1
+            }
+            let viewportRow = b.yBase - b.yDisp + r
+            return max(0, min(t.rows - 1, viewportRow))
+        }
     }
     
     /// Returns true when the user is holding Shift on an attached hardware keyboard

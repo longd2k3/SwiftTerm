@@ -490,6 +490,15 @@ struct ViewLineInfo {
     var powerlineGlyphs: [PowerlineRenderItem]
 }
 
+#if os(iOS) || os(visionOS)
+struct KittyPlaceholderBatchKey: Hashable {
+    let imageId: UInt32
+    let placementId: UInt32
+    let originRow: Int
+    let originCol: Int
+}
+#endif
+
 struct SnapshotSelectionResolver {
     let style: SnapshotStyle
     let cols: Int
@@ -3401,6 +3410,68 @@ extension TerminalView {
             }
         }
 
+        func drawKittyImage(_ image: TTImage, in rect: CGRect) {
+        #if os(iOS) || os(visionOS)
+            if let cg = image.cgImage {
+                context.draw(cg, in: rect)
+            }
+        #else
+            image.draw(in: rect)
+        #endif
+        }
+
+        #if os(iOS) || os(visionOS)
+        func kittyRenderImage(_ placement: KittyGraphicsRenderPlacement, targetPointSize: CGSize) -> TTImage? {
+            guard let image = kittyRenderSnapshot.imagesById[placement.imageId] else {
+                return nil
+            }
+            let source = placement.visibleSource
+            let key = KittyPlacementImageKey(
+                token: placement.token,
+                contentGeneration: image.contentGeneration,
+                source: source)
+            let scale = kittyImageScale
+            let targetW = max(1, min(source.width, Int((targetPointSize.width * scale).rounded())))
+            let targetH = max(1, min(source.height, Int((targetPointSize.height * scale).rounded())))
+            if let cached = kittyPlacementImageCache.withLock({ $0[key] }),
+               cached.pixelWidth == targetW && cached.pixelHeight == targetH {
+                return cached.image
+            }
+            var rgba = [UInt8]()
+            rgba.reserveCapacity(source.width * source.height * 4)
+            for row in source.y..<(source.y + source.height) {
+                let start = (row * image.width + source.x) * 4
+                let end = start + source.width * 4
+                rgba.append(contentsOf: image.rgba[start..<end])
+            }
+            guard let decoded = kittyImageFromRgba(
+                bytes: rgba, width: source.width, height: source.height) else { return nil }
+            let result: TTImage
+            if let ctx = CGContext(
+                data: nil,
+                width: targetW,
+                height: targetH,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            ), let croppedCG = decoded.cgImage {
+                ctx.interpolationQuality = .high
+                ctx.draw(croppedCG, in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+                if let scaledCG = ctx.makeImage() {
+                    result = TTImage(cgImage: scaledCG)
+                } else {
+                    result = decoded
+                }
+            } else {
+                result = decoded
+            }
+            kittyPlacementImageCache.withLock {
+                $0[key] = CachedKittyImage(pixelWidth: targetW, pixelHeight: targetH, image: result)
+            }
+            return result
+        }
+        #else
         func kittyRenderImage(_ placement: KittyGraphicsRenderPlacement) -> TTImage? {
             guard let image = kittyRenderSnapshot.imagesById[placement.imageId] else {
                 return nil
@@ -3423,6 +3494,7 @@ extension TerminalView {
             kittyPlacementImageCache.withLock { $0[key] = decoded }
             return decoded
         }
+        #endif
 
         func drawKittyPlacements(
             onScreenRow screenRow: Int,
@@ -3440,8 +3512,7 @@ extension TerminalView {
                 }
                 let geometry = placement.geometry
                 guard screenRow >= geometry.row,
-                      screenRow < geometry.row + geometry.rows,
-                      let image = kittyRenderImage(placement) else { continue }
+                      screenRow < geometry.row + geometry.rows else { continue }
                 let offsetX = CGFloat(placement.pixelOffsetX) / offsetScale
                 let offsetY = CGFloat(placement.pixelOffsetY) / offsetScale
                 let rowsBelow = geometry.row + geometry.rows - 1 - screenRow
@@ -3451,12 +3522,47 @@ extension TerminalView {
                     width: max(0, CGFloat(geometry.columns) * kittyCellWidth - offsetX),
                     height: max(0, CGFloat(geometry.rows) * kittyCellHeight - offsetY))
                 guard rect.width > 0, rect.height > 0 else { continue }
+                #if os(iOS) || os(visionOS)
+                guard let image = kittyRenderImage(placement, targetPointSize: rect.size) else { continue }
+                #else
+                guard let image = kittyRenderImage(placement) else { continue }
+                #endif
                 context.saveGState()
                 context.clip(to: lineRect)
-                image.draw(in: rect)
+                drawKittyImage(image, in: rect)
                 context.restoreGState()
             }
         }
+
+        #if os(iOS) || os(visionOS)
+        func kittyPlacementRect(_ placement: KittyGraphicsRenderPlacement) -> CGRect {
+            let geometry = placement.geometry
+            let offsetX = CGFloat(placement.pixelOffsetX) / kittyImageScale
+            let offsetY = CGFloat(placement.pixelOffsetY) / kittyImageScale
+            let bottomAbs = geometry.row + geometry.rows - 1 + snapshot.yDisp
+            let originY = frame.height - calcLineOffset(forRow: bottomAbs)
+            return CGRect(
+                x: CGFloat(geometry.column) * kittyCellWidth + offsetX,
+                y: originY + offsetY,
+                width: max(0, CGFloat(geometry.columns) * kittyCellWidth - offsetX),
+                height: max(0, CGFloat(geometry.rows) * kittyCellHeight - offsetY)
+            )
+        }
+        func drawKittyPlacementsOnce(layer: KittyGraphicsRenderLayer) {
+            let visStart = firstRow - snapshot.yDisp
+            let visEnd = lastRow - snapshot.yDisp
+            for placement in kittyRenderSnapshot.placements where !placement.isVirtual {
+                guard KittyGraphicsRenderLayer(zIndex: placement.zIndex) == layer else { continue }
+                let pStart = placement.geometry.row
+                let pEnd = pStart + placement.geometry.rows - 1
+                guard pEnd >= visStart && pStart <= visEnd else { continue }
+                let rect = kittyPlacementRect(placement)
+                guard rect.width > 0, rect.height > 0,
+                      let image = kittyRenderImage(placement, targetPointSize: rect.size) else { continue }
+                drawKittyImage(image, in: rect)
+            }
+        }
+        #endif
 
         #if os(macOS)
         // Clear the invalidated region before painting. We fill only cells that carry
@@ -3473,6 +3579,14 @@ extension TerminalView {
             context.setFillColor(coreGraphicsRenderCache.cgColor(for: renderContext.effectiveBackgroundColor))
             context.fill(dirtyRect)
         }
+        #endif
+
+        #if os(iOS) || os(visionOS)
+        if hasKittyPlacements {
+            drawKittyPlacementsOnce(layer: .belowBackground)
+        }
+        var placeholderBatches: [KittyPlaceholderBatchKey: (record: KittyGraphicsRenderPlacement, imageRect: CGRect, cells: [CGRect])] = [:]
+        var placeholderBatchOrder: [KittyPlaceholderBatchKey] = []
         #endif
 
         for row in firstRow...lastRow {
@@ -3587,12 +3701,14 @@ extension TerminalView {
                     return (segment, ctLine, runs)
                 }
 
+            #if os(macOS)
             if hasKittyPlacements {
                 drawKittyPlacements(
                     onScreenRow: row - snapshot.yDisp,
                     lineOrigin: lineOrigin,
                     layer: .belowBackground)
             }
+            #endif
 
             // Background fill loop — uses cached CTLines
             context.saveGState()
@@ -3850,10 +3966,6 @@ extension TerminalView {
                     }) else {
                         continue
                     }
-                    guard let image = kittyRenderImage(record) else {
-                        continue
-                    }
-
                     let offsetScale = getImageScale()
                     let offsetX = CGFloat(record.pixelOffsetX) / offsetScale
                     let offsetY = CGFloat(record.pixelOffsetY) / offsetScale
@@ -3867,6 +3979,28 @@ extension TerminalView {
                     if placementRect.width <= 0 || placementRect.height <= 0 {
                         continue
                     }
+                    #if os(iOS) || os(visionOS)
+                    let sourceSize = CGSize(width: record.visibleSource.width, height: record.visibleSource.height)
+                    let imageRect = kittyAspectFitRect(imageSize: sourceSize, in: placementRect)
+                    let cellRect = CGRect(x: lineOrigin.x + CGFloat(placeholder.col) * cellDimension.width,
+                                          y: lineOrigin.y,
+                                          width: cellDimension.width,
+                                          height: cellDimension.height)
+                    let key = KittyPlaceholderBatchKey(
+                        imageId: record.imageId,
+                        placementId: record.placementId,
+                        originRow: row - Int(placeholder.placeholderRow),
+                        originCol: placeholder.col - Int(placeholder.placeholderCol))
+                    if placeholderBatches[key] == nil {
+                        placeholderBatchOrder.append(key)
+                        placeholderBatches[key] = (record: record, imageRect: imageRect, cells: [cellRect])
+                    } else {
+                        placeholderBatches[key]!.cells.append(cellRect)
+                    }
+                    #else
+                    guard let image = kittyRenderImage(record) else {
+                        continue
+                    }
                     let imageRect = kittyAspectFitRect(imageSize: image.size, in: placementRect)
                     let cellRect = CGRect(x: lineOrigin.x + CGFloat(placeholder.col) * cellDimension.width,
                                           y: lineOrigin.y,
@@ -3874,17 +4008,20 @@ extension TerminalView {
                                           height: cellDimension.height)
                     context.saveGState()
                     context.clip(to: cellRect)
-                    image.draw(in: imageRect)
+                    drawKittyImage(image, in: imageRect)
                     context.restoreGState()
+                    #endif
                 }
             }
 
+            #if os(macOS)
             if hasKittyPlacements {
                 drawKittyPlacements(
                     onScreenRow: row - snapshot.yDisp,
                     lineOrigin: lineOrigin,
                     layer: .aboveText)
             }
+            #endif
             if !otherImages.isEmpty {
                 for image in otherImages {
                     let col = image.col
@@ -3932,6 +4069,20 @@ extension TerminalView {
 #endif
         
 #if os(iOS) || os(visionOS)
+        for key in placeholderBatchOrder {
+            guard let batch = placeholderBatches[key],
+                  !batch.cells.isEmpty,
+                  let image = kittyRenderImage(batch.record, targetPointSize: batch.imageRect.size) else { continue }
+            context.saveGState()
+            context.clip(to: batch.cells)
+            drawKittyImage(image, in: batch.imageRect)
+            context.restoreGState()
+        }
+
+        if hasKittyPlacements {
+            drawKittyPlacementsOnce(layer: .aboveText)
+        }
+
         if snapshot.style.selectionActive {
             let start, end: Position
 
