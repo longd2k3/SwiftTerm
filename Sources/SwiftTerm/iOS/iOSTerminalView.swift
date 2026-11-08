@@ -1044,7 +1044,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             linkHighlightRange = nil
             invalidateLinkHighlight(oldRange: oldRange, newRange: nil)
             frameDriver.markDirty()
-            terminalDelegate?.requestOpenLink(source: self, link: result.link, params: result.params)
+            let request = TerminalLinkRequest(link: result.link, params: result.params, isExplicit: result.isExplicit)
+            terminalDelegate?.requestOpenLink(source: self, request: request)
             return
         } else if linkHighlightMode == .hover || linkHighlightMode == .hoverWithModifier {
             let oldRange = linkHighlightRange
@@ -3965,6 +3966,15 @@ private final class PointerScrollGestureDelegate: NSObject, UIGestureRecognizerD
 // Default implementations for TerminalViewDelegate
 
 extension TerminalViewDelegate {    
+    public func requestOpenLink (source: TerminalView, request: TerminalLinkRequest)
+    {
+        requestOpenLinkWithoutDeprecationWarning(source: source, link: request.link, params: request.params)
+    }
+
+    public func requestOpenLink (source: TerminalView, link: String, params: [String:String])
+    {
+    }
+
     public func bell (source: TerminalView)
     {
         #if os(iOS)
