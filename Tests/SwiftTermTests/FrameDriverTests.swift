@@ -482,7 +482,7 @@ struct FrameDriverTests {
         var tickCount = 0
         driver.onTick = { tickCount += 1 }
         // Frozen clock: the limit is what is under test, not the machine's
-        // ability to run two statements inside 16 ms.
+        // ability to run two statements inside 8 ms.
         driver.nowUptimeNs = { 1_000_000_000 }
 
         driver.markDirty()

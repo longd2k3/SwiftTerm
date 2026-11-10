@@ -528,6 +528,23 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         updateTextBlinkLifecycle()
     }
 
+    @MainActor
+    public func setTerminalRenderingSuspended(_ suspended: Bool) {
+        frameDriver?.setVisibilityOnMain(visible: !suspended)
+        if !suspended {
+            frameDriver?.markDirty()
+#if canImport(MetalKit)
+            if useMetalRenderer, let metalView = metalView {
+                metalView.setNeedsDisplay(metalView.bounds)
+            } else {
+                setNeedsDisplay(bounds)
+            }
+#else
+            setNeedsDisplay(bounds)
+#endif
+        }
+    }
+
 #if canImport(MetalKit)
     /// Enables or disables GPU-accelerated rendering via Metal.
     ///

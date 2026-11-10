@@ -262,6 +262,13 @@ private final class MobileFrameDisplayLinkBackend: FrameDisplayLinkBackend {
         link = CADisplayLink(
             target: target,
             selector: #selector(FrameDisplayLinkTarget.displayLinkFired(_:)))
+        if #available(iOS 15.0, tvOS 15.0, visionOS 1.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(
+                minimum: 30.0,
+                maximum: 120.0,
+                preferred: 120.0
+            )
+        }
         link.isPaused = true
         link.add(to: .main, forMode: .common)
     }
@@ -295,7 +302,7 @@ struct FrameDriverCounters: Sendable {
 @MainActor
 final class FrameDriver {
     static let idleTickLimit = 8
-    private static let minimumResumeTickInterval: UInt64 = 16_000_000
+    private static let minimumResumeTickInterval: UInt64 = 8_000_000
 
     /// A producer-safe handle. It does not retain this driver.
     nonisolated let signal: FrameDriverSignal
