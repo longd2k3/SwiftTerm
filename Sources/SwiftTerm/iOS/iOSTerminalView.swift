@@ -2071,8 +2071,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return CGRect (x: 0, y: 0, width: cellDimension.width * CGFloat(size.cols), height: cellDimension.height * CGFloat(size.rows))
     }
     
+    /// Device pixels per point for inline images. Kitty pixel offsets are in the
+    /// pixels reported by `cellSizeInPixels`, which uses `backingScaleFactor()`,
+    /// so images must use the same scale. `window.contentScaleFactor` is 1 at
+    /// runtime (and with no window), so it must not be used here.
     func getImageScale () -> CGFloat {
-        self.window?.contentScaleFactor ?? 1
+        backingScaleFactor()
     }
     
     func getEffectiveWidth (size: CGSize) -> CGFloat

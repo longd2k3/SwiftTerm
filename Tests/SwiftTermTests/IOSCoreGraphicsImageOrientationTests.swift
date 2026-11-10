@@ -92,5 +92,28 @@ struct IOSCoreGraphicsImageOrientationTests {
         let blue = try #require(meanRow(frame) { r, g, b in b > 200 && r < 60 && g < 60 })
         #expect(red < blue, "red band drawn at row \(red), blue band at row \(blue)")
     }
+
+    @Test func kittyPlacementBitmapIsSizedInDevicePixels() throws {
+        let scale = UIScreen.main.scale
+        try #require(scale > 1, "needs a Retina simulator")
+        let view = TerminalView(frame: CGRect(x: 0, y: 0, width: Self.width, height: Self.height))
+        let sourceWidth = 200, sourceHeight = 120
+        let pixels = [UInt8](repeating: 128, count: sourceWidth * sourceHeight * 4)
+        let base64 = Data(pixels).base64EncodedString()
+        view.feed(text: "\u{1b}[H\u{1b}_Ga=T,f=32,s=\(sourceWidth),v=\(sourceHeight),c=5,r=2,i=9,q=2;\(base64)\u{1b}\\")
+        view.frameTick()
+        _ = try renderPixels(view)
+
+        let cache = view.kittyPlacementImageCache.withLock { $0 }
+        #expect(cache.count == 1)
+        let cached = try #require(cache.first?.value)
+        let expectedWidth = min(sourceWidth, Int((5 * view.cellSize.width * scale).rounded()))
+        let expectedHeight = min(sourceHeight, Int((2 * view.cellSize.height * scale).rounded()))
+        try #require(expectedWidth < sourceWidth && expectedHeight < sourceHeight,
+                     "expectations must come from the device scale, not the source cap")
+        #expect(cached.pixelWidth == expectedWidth)
+        #expect(cached.pixelHeight == expectedHeight)
+        #expect(cached.image.cgImage?.width == expectedWidth)
+    }
 }
 #endif
